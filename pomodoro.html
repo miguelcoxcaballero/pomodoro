@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pomodoro Spiral Timer – Pantalla Siempre Activa</title>
+  <style>
+    :root {
+      --cell: clamp(18px, 9vw, 48px);
+      --gap: calc(var(--cell)*0.18);
+      --knob: clamp(90px, 32vw, 200px);
+      --dent: calc(var(--knob)*0.12);
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: clamp(16px,4vh,40px);
+      background: #111;
+      color: #fff;
+      font-family: system-ui, Arial, sans-serif;
+    }
+    #matrix {
+      display: grid;
+      grid-template-columns: repeat(8, var(--cell));
+      grid-template-rows: repeat(8, var(--cell));
+      gap: var(--gap);
+      touch-action: none;
+    }
+    .cell {
+      width: var(--cell);
+      height: var(--cell);
+      border-radius: 50%;
+      background: #222;
+      box-shadow: inset 0 0 calc(var(--cell)*0.17) #000;
+      transition: background .12s, box-shadow .12s;
+    }
+    .cell.on {
+      background: #f00;
+      box-shadow:
+        0 0 calc(var(--cell)*0.3) #f00,
+        inset 0 0 calc(var(--cell)*0.17) #800;
+    }
+    #knob {
+      width: var(--knob);
+      height: var(--knob);
+      border-radius: 50%;
+      background: #111;
+      border: var(--dent) dotted #222;
+      user-select: none;
+      touch-action: none;
+      transition: transform .12s ease-out;
+    }
+    @media (prefers-color-scheme: light) {
+      body { background: #eee; color: #000; }
+    }
+  </style>
+</head>
+<body>
+  <div id="matrix"></div>
+  <div id="knob"></div>
+  <script>
+    // ===== Wake Lock API: evita que la pantalla se apague =====
+    let wakeLock = null;
+    async function requestWakeLock() {
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => {
+          console.log('Wake Lock liberado');
+        });
+        console.log('Wake Lock adquirido');
+      } catch (err) {
+        console.error(`No se pudo adquirir Wake Lock: ${err.name}, ${err.message}`);
+      }
+    }
+    // Solicitar al cargar
+    document.addEventListener('DOMContentLoaded', () => {
+      if ('wakeLock' in navigator) requestWakeLock();
+    });
+    // Volver a solicitar al volver a pestaña visible
+    document.addEventListener('visibilitychange', () => {
+      if (wakeLock !== null && document.visibilityState === 'visible') {
+        requestWakeLock();
+      }
+    });
+
+    // ===== LED matrix setup =====
+    const N = 8, matrix = document.getElementById('matrix');
+    const cells = Array.from({length:N}, (_,r) =>
+      Array.from({length:N}, (_,c) => {
+        const d = document.createElement('div');
+        d.className = 'cell';
+        matrix.appendChild(d);
+        return d;
+      })
+    );
+    const delay = ms => new Promise(r => setTimeout(r, ms));
+    function setFrame(rows) {
+      rows.forEach((row,r) =>
+        cells[r].forEach((d,c) =>
+          d.classList.toggle('on', !!(row >> (7 - c) & 1))
+        )
+      );
+    }
+    function clearAll() {
+      cells.flat().forEach(d => d.classList.remove('on'));
+    }
+
+    // ===== Haptic + audio clicks =====
+    const vibrate = t => navigator.vibrate?.(t);
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    function makeClick(freq, vib) {
+      return () => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.frequency.value = freq;
+        g.gain.setValueAtTime(1, ctx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.03);
+        o.connect(g).connect(ctx.destination);
+        o.start(); o.stop(ctx.currentTime + 0.03);
+        vibrate(vib);
+      };
+    }
+    const scrollClick = makeClick(150, 10),
+          pressClick  = makeClick(600, 40);
+
+    // ===== Knob & tap logic =====
+    const knob = document.getElementById('knob');
+    const STEP_ANGLE   = 360/25;
+    const CLICK_THRESH = 200;
+    const DBL_THRESH   = 300;
+    let turns=0, startA=0, startT=0, dragging=false;
+    let lastTap=0, tapTimer=null;
+
+    function pressAnim(){
+      pressClick();
+      knob.style.transform = `rotate(${turns*STEP_ANGLE}deg) scale(.9)`;
+      setTimeout(() => knob.style.transform = `rotate(${turns*STEP_ANGLE}deg) scale(1)`, 100);
+    }
+    function curSel(){ return ((turns%3)+3)%3; }
+
+    knob.addEventListener('pointerdown', e => {
+      const now = Date.now();
+      if (now - lastTap < DBL_THRESH) {
+        clearTimeout(tapTimer);
+        tapTimer = null;
+        pressAnim(); pressAnim();
+        handleDoubleTap();
+        lastTap = 0;
+        return;
+      }
+      lastTap = now;
+      pressAnim();
+
+      dragging = false;
+      knob.setPointerCapture(e.pointerId);
+      const rc = knob.getBoundingClientRect(),
+            cx = rc.left + rc.width/2,
+            cy = rc.top  + rc.height/2;
+      startA  = (Math.atan2(e.clientY-cy, e.clientX-cx)*180/Math.PI + 450)%360;
+      startT  = turns;
+
+      const onMove = ev => {
+        if (Date.now() - now > CLICK_THRESH) dragging = true;
+        if (!dragging) return;
+        const rc2 = knob.getBoundingClientRect(),
+              cx2 = rc2.left + rc2.width/2,
+              cy2 = rc2.top  + rc2.height/2;
+        let a = (Math.atan2(ev.clientY-cy2, ev.clientX-cx2)*180/Math.PI + 450)%360;
+        let d = a - startA;
+        if (d > 180)  d -= 360;
+        if (d < -180) d += 360;
+        const tgt = Math.round(startT + d/STEP_ANGLE);
+        if (tgt !== turns) {
+          turns = tgt;
+          knob.style.transform = `rotate(${turns*STEP_ANGLE}deg)`;
+          scrollClick();
+          if (state==='menu') showMenu();
+        }
+      };
+      const onUp = () => {
+        knob.releasePointerCapture(e.pointerId);
+        knob.removeEventListener('pointermove', onMove);
+        knob.removeEventListener('pointerup',   onUp);
+        if (dragging) return;
+        tapTimer = setTimeout(() => {
+          tapTimer = null;
+          handleSingleTap();
+        }, DBL_THRESH);
+      };
+      knob.addEventListener('pointermove', onMove);
+      knob.addEventListener('pointerup',   onUp);
+    });
+
+    function handleSingleTap() {
+      if (state==='menu') {
+        clearAll();
+        startTimer(minutes[curSel()]);
+      }
+    }
+    function handleDoubleTap() {
+      if (state==='timer') cancelTimer = true;
+      clearAll();
+      menu();
+    }
+
+    // ===== Fonts & UI =====
+    const FONT5 = {
+      p:["11110","10001","11110","10000","10000","10000","00000"],
+      o:["01110","10001","10001","10001","10001","01110","00000"],
+      m:["10001","11011","10101","10001","10001","10001","00000"],
+      d:["11110","10001","10001","10001","10001","11110","00000"],
+      r:["11110","10001","11110","10100","10010","10001","00000"],
+      ' ':["00000","00000","00000","00000","00000","00000","00000"]
+    };
+    function charCols(ch){
+      const rows = FONT5[ch]||FONT5[' '], cols=[];
+      for(let x=0;x<5;x++){
+        let v=0;
+        for(let y=0;y<7;y++){
+          if(rows[y][x]==='1') v |= 1<<(6-y);
+        }
+        cols.push(v);
+      }
+      return cols;
+    }
+    function messageCols(str){
+      return [].concat(...[...str].map(ch => [...charCols(ch),0]));
+    }
+    const DIG4 = [
+      [6,9,9,9,9,9,6,0],[4,12,4,4,4,4,14,0],[6,9,1,2,4,8,15,0],
+      [6,9,1,6,1,9,6,0],[2,6,10,10,15,2,2,0],[15,8,14,1,1,9,6,0],
+      [6,8,14,9,9,9,6,0],[15,1,2,4,4,4,4,0],[6,9,9,6,9,9,6,0],[6,9,9,7,1,2,4,0]
+    ];
+    function drawCount(n){
+      const t=Math.floor(n/10), o=n%10;
+      for(let r=0;r<8;r++){
+        const row = ((t?DIG4[t][r]<<4:0)|DIG4[o][r]);
+        cells[r].forEach((d,c)=>d.classList.toggle('on', !!(row>>(7-c)&1)));
+      }
+    }
+    function showMenu(){
+      clearAll();
+      drawCount(minutes[curSel()]);
+    }
+
+    // ===== Intro & Menu =====
+    let state='intro';
+    async function intro(){
+      clearAll(); state='intro';
+      const TOM=[0b00101000,0b01111100,0b11111110,0b11111110,
+                 0b11111110,0b01111100,0b00111000,0];
+      setFrame(TOM); await delay(600);
+      const cols = messageCols("pomodoro"),
+            total = cols.length + 8;
+      for(let off=0; off<total; off++){
+        if(state!=='intro') return;
+        const frame = Array(8).fill(0);
+        for(let x=0;x<8;x++){
+          const idx = off + x - 8;
+          if(idx>=0 && idx<cols.length){
+            const bits = cols[idx];
+            for(let y=0;y<7;y++){
+              if((bits>>(6-y))&1) frame[y] |= 1<<(7-x);
+            }
+          }
+        }
+        setFrame(frame);
+        await delay(70);
+      }
+      menu();
+    }
+    function menu(){
+      state='menu';
+      showMenu();
+    }
+
+    // ===== Spiral Timer =====
+    const spiral = (() => {
+      const a=[]; let t=0,b=7,l=0,r=7;
+      while(l<=r){
+        for(let i=l;i<=r;i++) a.push([t,i]);
+        for(let i=t+1;i<=b;i++) a.push([i,r]);
+        if(t<b) for(let i=r-1;i>=l;i--) a.push([b,i]);
+        if(l<r) for(let i=b-1;i>t;i--) a.push([i,l]);
+        t++; b--; l++; r--;
+      }
+      return a;
+    })();
+    let cancelTimer = false;
+    async function startTimer(m){
+      state='timer'; cancelTimer=false;
+      clearAll();
+      const per = m*60000*0.92/64,
+            blink = 1500;
+      for(const [r,c] of spiral){
+        if(cancelTimer) return;
+        const cell = cells[r][c];
+        const end = Date.now() + per;
+        let on = false;
+        while(Date.now() < end){
+          if(cancelTimer) return;
+          on = !on;
+          cell.classList.toggle('on', on);
+          await delay(blink);
+        }
+        if(cancelTimer) return;
+        cell.classList.add('on');
+      }
+      if(!cancelTimer){
+        drawCount(m);
+        await delay(1500);
+      }
+      if(!cancelTimer) menu();
+    }
+
+    // ===== Options =====
+    const minutes = [25,5,15];
+
+    // ===== Start =====
+    intro();
+  </script>
+</body>
+</html>
