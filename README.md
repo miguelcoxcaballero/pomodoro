@@ -2,6 +2,8 @@
 
 A responsive, mobile-friendly Pomodoro timer implemented as a web page that simulates an 8×8 LED matrix and a rotary knob control. It keeps the screen awake using the Wake Lock API and provides haptic feedback on supported devices.
 
+<img src="image.png" width="350" alt="image.png">
+
 ## Features
 
 - **8×8 LED Matrix Simulation**: Renders a dynamic spiral fill and displays numbers using a pixel font.
